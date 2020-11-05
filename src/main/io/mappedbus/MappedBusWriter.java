@@ -116,6 +116,10 @@ public class MappedBusWriter {
 	 */
 	public boolean write(byte[] src, int offset, int length) throws EOFException {
 		long commitPos = writeRecord(src, offset, length);
+		if(commitPos==-1) {
+			return false
+					;
+		}
 		return commit(commitPos);
 	}
 

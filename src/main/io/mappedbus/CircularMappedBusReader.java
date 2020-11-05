@@ -54,7 +54,7 @@ import java.io.IOException;
  * }
  * </pre>
  */
-public class MappedBusReader {
+public class CircularMappedBusReader {
 
 	protected static final long MAX_TIMEOUT_COUNT = 100;
 
@@ -62,7 +62,7 @@ public class MappedBusReader {
 
 	private final long fileSize;
 
-	private final int recordSize;
+	//private final int recordSize;
 
 	private MemoryMappedFile mem;
 
@@ -80,6 +80,15 @@ public class MappedBusReader {
 
 	private boolean typeRead;
 	
+	
+	private final long startLoc = 0l;
+	private final long endLoc = 8l;
+	private final long flagLoc = 16;
+	private final long lastFlipLoc = 20;
+	private final long miscSize = 28l;
+	
+	private  long readPointer;
+	private long readPointerwithoutRead;
 	/**
 	 * Constructs a new reader.
 	 *
@@ -87,10 +96,10 @@ public class MappedBusReader {
 	 * @param fileSize the maximum size of the file
 	 * @param recordSize the maximum size of a record (excluding status flags and meta data)
 	 */
-	public MappedBusReader(String fileName, long fileSize, int recordSize) {
+	public CircularMappedBusReader(String fileName, long fileSize) {
 		this.fileName = fileName;
 		this.fileSize = fileSize;
-		this.recordSize = recordSize;
+		//this.recordSize = recordSize;
 	}
 
 	/**
@@ -104,6 +113,9 @@ public class MappedBusReader {
 		} catch(Exception e) {
 			throw new IOException("Unable to open the file: " + fileName, e);
 		}
+		mem.compareAndSwapLong(startLoc, 0, miscSize);
+		mem.compareAndSwapLong(endLoc, 0, miscSize);
+
 		initialLimit = mem.getLongVolatile(Structure.Limit);
 	}
 
@@ -129,50 +141,86 @@ public class MappedBusReader {
 	 * @throws EOFException in case the end of the file was reached
 	 */
 	public boolean next() throws EOFException {
-		if (limit >= fileSize) {
-			throw new EOFException("End of file was reached");
+		long startP = mem.getLongVolatile(startLoc);
+		long lastFlip = mem.getLongVolatile(lastFlipLoc);
+		if (lastFlip== startP) {
+			System.out.println("lastFlip="+lastFlip + " startP="+startP);
+			
+			// throw new EOFException("End of file was reached");
+			//System.out.println("End of file has reached, switiching end pointer");
+			long end= mem.getLongVolatile(endLoc);
+			if( end == lastFlip || end== miscSize) {
+				return false;
+			}
+			mem.compareAndSwapLong(startLoc, startP, miscSize);
+			startP=miscSize;
+			boolean updated = false;
+			while (!updated) {
+				updated = mem.compareAndSwapInt(flagLoc, 0, 1);
+				if (!updated) {
+					updated = mem.compareAndSwapInt(flagLoc, 1, 0);
+				}
+			}
+
 		}
-		if (prevLimit != 0 && limit - prevLimit < Length.RecordHeader + recordSize) {
-			limit = prevLimit + Length.RecordHeader + recordSize;
-		}
-		if (mem.getLongVolatile(Structure.Limit) <= limit) {
-			return false;
-		}
-		int statusFlag = mem.getIntVolatile(limit);
+		
+		//Is end ahead start ?
+		long endP = mem.getLongVolatile(endLoc);
+		System.out.println(" start= "+startP +"  end ="+endP);
+				if(mem.getInt(flagLoc)==0) {
+					
+					if (startP == endP) {
+						//can't write, retry again
+						System.out.println("No new message available , queue is empty. can'r read");
+						return false;
+					}
+				}
+//		if (limit >= fileSize) {
+//			throw new EOFException("End of file was reached");
+//		}
+//		if (prevLimit != 0 && limit - prevLimit < Length.RecordHeader + recordSize) {
+//			limit = prevLimit + Length.RecordHeader + recordSize;
+//		}
+//		if (mem.getLongVolatile(Structure.Limit) <= limit) {
+//			return false;
+//		}
+		int statusFlag = mem.getIntVolatile(startP);
 		if (statusFlag == StatusFlag.Rollback) {
-			limit += Length.RecordHeader + recordSize;
-			prevLimit = 0;
-			timeoutCounter = 0;
-			timerStart = 0;
-			return false;
+//			limit += Length.RecordHeader + recordSize;
+//			prevLimit = 0;
+//			timeoutCounter = 0;
+//			timerStart = 0;
+//			return false;
 		}
 		if (statusFlag == StatusFlag.Commit) {
 			timeoutCounter = 0;
 			timerStart = 0;
 			prevLimit = limit;
+			readPointer= startP;
+			readPointerwithoutRead= startP;
 			return true;
 		}
 		timeoutCounter++;
-		if (timeoutCounter >= MAX_TIMEOUT_COUNT) {
-			if (timerStart == 0) {
-				timerStart = System.currentTimeMillis();
-			} else {
-				if (System.currentTimeMillis() - timerStart >= maxTimeout) {
-					if (!mem.compareAndSwapInt(limit, StatusFlag.NotSet, StatusFlag.Rollback)) {
-						// there are two cases this can happen
-						// 1) a slow writer eventually set the status flag to commit
-						// 2) another reader set the status flag to rollback right before this reader was going to
-						// in both cases return false, and the value of the status flag will be used in the next call to this method
-						return false;
-					}
-					limit += Length.RecordHeader + recordSize;
-					prevLimit = 0;
-					timeoutCounter = 0;
-					timerStart = 0;
-					return false;
-				}
-			}
-		}
+//		if (timeoutCounter >= MAX_TIMEOUT_COUNT) {
+//			if (timerStart == 0) {
+//				timerStart = System.currentTimeMillis();
+//			} else {
+//				if (System.currentTimeMillis() - timerStart >= maxTimeout) {
+//					if (!mem.compareAndSwapInt(limit, StatusFlag.NotSet, StatusFlag.Rollback)) {
+//						// there are two cases this can happen
+//						// 1) a slow writer eventually set the status flag to commit
+//						// 2) another reader set the status flag to rollback right before this reader was going to
+//						// in both cases return false, and the value of the status flag will be used in the next call to this method
+//						return false;
+//					}
+//					limit += Length.RecordHeader + recordSize;
+//					prevLimit = 0;
+//					timeoutCounter = 0;
+//					timerStart = 0;
+//					return false;
+//				}
+//			}
+//		}
 		return false;
 	}
 
@@ -183,9 +231,9 @@ public class MappedBusReader {
 	 */
 	public int readType() {
 		typeRead = true;
-		limit += Length.StatusFlag;
-		int type = mem.getInt(limit);
-		limit += Length.Metadata;
+		readPointer += Length.StatusFlag;
+		int type = mem.getInt(readPointer);
+		readPointer += Length.Metadata;
 		return type;
 	}
 
@@ -195,15 +243,15 @@ public class MappedBusReader {
 	 * @param message the message object to populate
 	 * @return the message object
 	 */
-	public MappedBusMessage readMessage(MappedBusMessage message) {
-		if (!typeRead) {
-			readType();
-		}
-		typeRead = false;
-		message.read(mem, limit);
-		limit += recordSize;
-		return message;
-	}
+//	public MappedBusMessage readMessage(MappedBusMessage message) {
+//		if (!typeRead) {
+//			readType();
+//		}
+//		typeRead = false;
+//		message.read(mem, readPointer);
+//		readPointer += recordSize;
+//		return message;
+//	}
 
 	/**
 	 * Reads the next buffer of data.
@@ -213,12 +261,18 @@ public class MappedBusReader {
 	 * @return the length of the record that was read
 	 */
 	public byte[] readBuffer( int offset) {
-		limit += Length.StatusFlag;
-		int length = mem.getInt(limit);
+		readPointer += Length.StatusFlag;
+		int length = mem.getInt(readPointer);
+		readPointer += Length.Metadata;
 		byte[] data= new byte[length];
-		limit += Length.Metadata;
-		mem.getBytes(limit, data, offset, length);
-		limit += recordSize;
+
+		mem.getBytes(readPointer, data, offset, length);
+		readPointer += length;
+		boolean commit =mem.compareAndSwapLong(startLoc, readPointerwithoutRead, readPointer);
+		if(!commit) {
+			System.out.println("Commit failed changing, will try reading it again.");
+			return null;
+		}
 		return data;
 	}
 
